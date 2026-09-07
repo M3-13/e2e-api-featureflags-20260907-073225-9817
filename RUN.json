@@ -9,7 +9,13 @@
       "build": [["go", "build", "./..."]],
       "start": ["go", "run", "."],
       "port": 8080,
-      "health": { "path": "/healthz", "expect_status": [200] }
+      "health": { "path": "/healthz", "expect_status": [200] },
+      "env": {
+        "AUTH_TOKEN": {
+          "external": true,
+          "degraded_without": "all /flags routes answer 401; GET /healthz stays reachable"
+        }
+      }
     }
   ]
 }

@@ -9,12 +9,14 @@ import (
 
 func evaluateRequest(t *testing.T, key, user string) (int, evaluateResult) {
 	t.Helper()
+	setAuthEnv(t)
 	mux := newMux()
 	path := "/flags/" + key + "/evaluate"
 	if user != "" {
 		path += "?user=" + user
 	}
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 

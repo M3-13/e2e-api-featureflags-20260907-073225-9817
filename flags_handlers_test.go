@@ -14,8 +14,21 @@ func resetStore() {
 }
 
 // do performs an HTTP request against newMux and returns the recorder.
+// testAuthToken is the AUTH_TOKEN used across the handler tests. The helper
+// setAuthEnv installs it so authenticated requests pass authMiddleware.
+const testAuthToken = "test-token"
+
+// setAuthEnv sets the AUTH_TOKEN environment variable for the current test.
+func setAuthEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("AUTH_TOKEN", testAuthToken)
+}
+
+// do performs an HTTP request against newMux and returns the recorder. It sends
+// a valid Authorization header so the request passes authMiddleware.
 func do(t *testing.T, method, target, contentType string, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	setAuthEnv(t)
 	var req *http.Request
 	if body != "" {
 		req = httptest.NewRequest(method, target, strings.NewReader(body))
@@ -25,6 +38,7 @@ func do(t *testing.T, method, target, contentType string, body string) *httptest
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
 	rr := httptest.NewRecorder()
 	newMux().ServeHTTP(rr, req)
 	return rr

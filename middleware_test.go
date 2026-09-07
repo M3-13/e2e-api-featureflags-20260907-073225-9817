@@ -89,3 +89,54 @@ func TestLoggingMiddlewareOmitsQueryStringOnEvaluate(t *testing.T) {
 		t.Fatalf("log line missing method: %q", out)
 	}
 }
+
+func TestAuthMiddlewareMissingToken(t *testing.T) {
+	t.Setenv("AUTH_TOKEN", testAuthToken)
+	req := httptest.NewRequest(http.MethodGet, "/flags", nil)
+	rr := httptest.NewRecorder()
+	newMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing token, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddlewareWrongToken(t *testing.T) {
+	t.Setenv("AUTH_TOKEN", testAuthToken)
+	req := httptest.NewRequest(http.MethodGet, "/flags", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rr := httptest.NewRecorder()
+	newMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong token, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddlewareEmptyConfiguredToken(t *testing.T) {
+	t.Setenv("AUTH_TOKEN", "")
+	req := httptest.NewRequest(http.MethodGet, "/flags", nil)
+	rr := httptest.NewRecorder()
+	newMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when AUTH_TOKEN is empty, got %d", rr.Code)
+	}
+}
+
+func TestHealthzWithoutToken(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+	newMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /healthz without token, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddlewareValidToken(t *testing.T) {
+	t.Setenv("AUTH_TOKEN", testAuthToken)
+	req := httptest.NewRequest(http.MethodGet, "/flags", nil)
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	rr := httptest.NewRecorder()
+	newMux().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid token, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
