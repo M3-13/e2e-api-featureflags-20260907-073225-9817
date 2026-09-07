@@ -1,69 +1,90 @@
-VERDICT: BLOCKED
+VERDICT: CHANGES_REQUESTED
 
-Ich habe den vollständig zusammengeführten Stand manuell geprüft. Automatisierte Scanner waren für diesen Go-Backend-Typ nicht verfügbar; die Beurteilung beruht auf der Codeanalyse.
+## Scanner-Abdeckung
+Es wurden keine anwendbaren Security-Scanner-Ergebnisse geliefert (`no applicable security scanners for this project type`). Das ist eine Dokumentationslücke, aber kein eigenständiger Befund. Die folgende Bewertung basiert auf manueller Code-Analyse des sichtbaren Go-Backends.
 
-Die in den Acceptance Criteria geforderten Security-Maßnahmen (Body-Limit 1 MiB, strikter `Content-Type`-Check, generische JSON-Fehlertexte, Timeouts, Logging ohne Query-String, keine Speicherung von Nutzerkennungen) sind überwiegend korrekt umgesetzt. Allerdings fehlt eine grundlegende Zugriffskontrolle, was für einen produktionsnahen Feature-Flag-Dienst ein hohes Risiko darstellt.
+## Zusammenfassung
+Die Anwendung erfüllt die wesentlichen Security-Vorgaben: keine hartkodierten Secrets, Body-Limit von 1 MiB, Content-Type-Prüfung, generische JSON-Fehler, Timeouts, Auth-Middleware mit konstantem Token-Vergleich und ein Logging, das Query-Strings ausblendet. Es besteht jedoch eine relevante Verfügbarkeitsschwäche in der Reihenfolge von Rate-Limiting und Authentifizierung sowie zwei kleinere Härtungsthemen.
 
 ---
 
-## Sicherheitsbericht
+## Befund 1 — Rate-Limit vor Authentifizierung ermöglicht unauthentifizierte Denial-of-Service-Angriffe
 
-### 1. Hoch: Fehlende Authentifizierung und Autorisierung
-**Betroffene Stelle:** `main.go` (Routenregistrierung ohne schützende Middleware), alle Handler unter `/flags`
+**Schweregrad:** medium  
+**Betroffene Stelle:** `main.go` – `Handler: loggingMiddleware(rateLimitMiddleware(mux))` in Kombination mit `newMux()` (Auth nur innerhalb der einzelnen Routen).
 
 **Beschreibung:**  
-Der Server bindet an `:8080` (alle Interfaces) und stellt sämtliche Endpunkte ohne jeden Authentifizierungs- oder Autorisierungsmechanismus bereit. Jeder, der den Port erreichen kann, kann:
+Das Rate-Limiting wird um den gesamten Mux gelegt und zählt daher auch unauthentifizierte Anfragen, die von `authMiddleware` später mit `401` beantwortet werden. Dadurch kann ein Angreifer den Token-Bucket leeren, ohne gültige Anmeldedaten zu besitzen.
 
-- neue Flags anlegen (`POST /flags`),
-- bestehende Flags ändern (`PUT /flags/{key}`),
-- Flags löschen (`DELETE /flags/{key}`),
-- Feature-Rollouts und `enabled`-Zustände beliebig manipulieren.
+Da der Server explizit auf `127.0.0.1:8080` lauscht, ist ein Betrieb hinter einem Reverse-Proxy (z. B. auf demselben Host) sehr wahrscheinlich. In dieser üblichen Konstellation ist `RemoteAddr` für alle eingehenden Verbindungen die Proxy-IP (oft `127.0.0.1`). Damit teilen sich **alle Clients** einen einzigen Token-Bucket. Bereits 100 schnelle, unauthentifizierte Anfragen genügen, um den Bucket zu leeren; anschließend erhalten auch legitime authentifizierte Anfragen `429 Too Many Requests`.
 
-Ein Angreifer im selben Netzwerk oder bei versehentlicher Exposition des Ports kann damit Features deaktivieren, ungewollte Rollouts aktivieren oder die gesamte Flag-Konfiguration zerstören. Das ist ein echter unbefugter Eingriff in die Anwendungssteuerung.
+**Konkreter Fix:**  
+Die Reihenfolge von Auth und Rate-Limit umkehren, z. B. für geschützte Routen:
 
-**Konkrete Behebung:**  
-Eine Authentifizierungs-Middleware vor die Mutations- und ggf. Lese-Endpunkte schalten, z. B.:
+```go
+mux.Handle("GET /flags", authMiddleware(rateLimitMiddleware(http.HandlerFunc(handleListFlags))))
+```
 
-- einen statischen API-Key/Token im `Authorization`-Header verlangen und mit `crypto/subtle.ConstantTimeCompare` prüfen,
-- alternativ mTLS oder eine vorgeschaltete Identity-/Policy-Schicht verwenden,
-- zusätzlich den Server nur an ein privates Interface binden (z. B. `127.0.0.1:8080` oder internes Pod-Netz) und per Netzwerkrichtlinie absichern.
+`/healthz` bleibt bewusst ungeschützt. Für `/healthz` kann ein eigener, kleiner Rate-Limit-Limiter verwendet oder der Endpoint in der lokalen Standardkonfiguration ohne Limit betrieben werden. Wichtig ist, dass unauthentifizierte `401`-Antworten den Bucket für authentifizierte Nutzer nicht verbrauchen.
 
-Erst danach kann das Produkt sicher ausgeliefert werden.
+**Reconciliation:**  
+Die Änderung erhält die Rate-Limit-Funktion für authentifizierte Clients vollständig. `/healthz` bleibt erreichbar; authentifizierte Feature-Flag-Endpunkte funktionieren unverändert, sind aber nicht mehr durch unauthentifizierte Floods aus derselben Proxy-IP blockierbar.
 
 ---
 
-### 2. Mittel: Unverschlüsselter Transport und Bindung an alle Interfaces
-**Betroffene Stelle:** `main.go`, `Addr: ":8080"`
+## Befund 2 — Token-Bucket-Map wächst unbegrenzt
+
+**Schweregrad:** low  
+**Betroffene Stelle:** `rate_limit.go` – `rateLimiter` mit `buckets map[string]*tokenBucket`.
 
 **Beschreibung:**  
-Der Dienst lauscht auf allen verfügbaren Netzwerkschnittstellen und bietet ausschließlich HTTP an. Flag-Konfigurationen (einschließlich Beschreibungen, die geschäftliche Informationen enthalten können) und die Steuerungsendpunkte sind damit unverschlüsselt und bei aktiver Netzwerkkommunikation abhör- und manipulierbar.
+Für jede neue `clientIP` wird ein Bucket in der Map angelegt, aber niemals entfernt. In der aktuellen lokalen Konfiguration ist die Angriffsfläche klein, da nur wenige IPs vorkommen. Sobald der Dienst jedoch hinter dem Proxy oder in anderer Umgebung mit vielen Client-IPs betrieben wird, wächst die Map ungebremst und kann Speicher erschöpfen.
 
-**Konkrete Behebung:**  
-- Server nur an Loopback oder ein klar definiertes internes Interface binden, z. B. `127.0.0.1:8080`, sofern kein externer Zugriff nötig ist.
-- In Produktion TLS verwenden (`http.Server` mit `ListenAndServeTLS`) oder den Dienst hinter einem TLS-terminierenden Reverse-Proxy betreiben.
+**Konkreter Fix:**  
+Einen periodischen Cleanup einführen, der Buckets mit sehr altem `lastRefill` löscht, oder die Map-Größe begrenzen. Beispiel: ein Hintergrund-`time.Ticker` im `rateLimiter`, der Einträge ohne Aktivität seit z. B. 10 Minuten entfernt. Alternativ ein LRU-Ansatz für die Buckets.
+
+**Reconciliation:**  
+Das normale Rate-Limit-Verhalten bleibt unverändert; lediglich verwaiste Buckets werden entfernt. Die Funktionalität der Endpunkte wird nicht beeinträchtigt.
 
 ---
 
-### 3. Niedrig: Kein Rate-Limiting / Bruteforce-Schutz
-**Betroffene Stelle:** `main.go`, keine begrenzende Middleware
+## Befund 3 — Log-Injection über URL-Pfad möglich
+
+**Schweregrad:** low  
+**Betroffene Stelle:** `middleware.go` – `logger.Printf("method=%s path=%s status=%d duration=%s", r.Method, r.URL.Path, rec.status, time.Since(start))`.
 
 **Beschreibung:**  
-Der Dienst hat keinen Schutz gegen wiederholte Anfragen. Das ist besonders relevant, falls später eine Authentifizierung per API-Key ergänzt wird: Ein Angreifer könnte den Key durchmassives Durchprobieren erraten oder den Dienst durch viele große Anfragen belasten. Body-Limit und Timeouts begrenzen einzelne Anfragen, aber nicht die Anzahl der Anfragen pro Client.
+`r.URL.Path` ist URL-dekodiert und kann Steuerzeichen wie Zeilenumbrüche enthalten (z. B. `%0A`). Ein Angreifer kann dadurch manipulierte Anfragen senden, die zusätzliche Log-Zeilen vortäuschen oder Log-Analyse-Systeme stören. Der Query-String wird bereits korrekt entfernt; der Pfad selbst wird jedoch ungefiltert protokolliert.
 
-**Konkrete Behebung:**  
-Eine Rate-Limiting-Middleware ergänzen, z. B. auf Basis der Client-IP mit einem Token-Bucket-Verfahren. Zusätzlich bei Authentifizierung auf kurze, zufällige Token mit hoher Entropie setzen.
+**Konkreter Fix:**  
+Den Pfad beim Logging sanitisieren, z. B. durch eine Hilfsfunktion:
+
+```go
+func logSafe(s string) string {
+    return strings.Map(func(r rune) rune {
+        if r < 0x20 || r == 0x7f {
+            return '_'
+        }
+        return r
+    }, s)
+}
+```
+
+und dann:
+
+```go
+logger.Printf("method=%s path=%s status=%d duration=%s",
+    r.Method, logSafe(r.URL.Path), rec.status, time.Since(start))
+```
+
+**Reconciliation:**  
+Normale Pfade wie `/flags` oder `/flags/key/evaluate` bleiben exakt gleich und bestehen keine Log-Tests auf `path=/flags` unverändert. Nur nicht druckbare Zeichen werden ersetzt; die Produktfunktion wird nicht beeinflusst.
 
 ---
 
-## Positiv umgesetzte Sicherheitsaspekte
-- Request-Body wird über `http.MaxBytesReader` auf 1 MiB begrenzt; Überschreitung liefert `413` mit generischer JSON-Fehlermeldung.
-- `Content-Type: application/json` wird strikt geprüft; Abweichungen führen zu `415`.
-- JSON-Parsing-Fehler werden generisch als `invalid request body` beantwortet, ohne interne Fehlertexte.
-- Server-Timeout-Werte sind wie gefordert konfiguriert.
-- Die Logging-Middleware protokolliert ausschließlich `r.URL.Path` und entfernt so den Query-String, sodass der `user`-Wert nicht im Log erscheint.
-- Der In-Memory-Store speichert nur Flag-Daten; Evaluierungs-Nutzerkennungen werden nicht persistiert.
-- Die Handler sind gut gegen Race-Conditions geschützt (`sync.RWMutex`).
-
----
-
-Die schwerwiegendste Lücke ist die fehlende Zugriffskontrolle. Ein Feature-Flag-Dienst, der unauthentifiziert erreichbar ist, erlaubt die Manipulation zentraler Anwendungsfunktionen und muss vor einem Produktivbetrieb zwingend abgesichert werden.
+## Nicht beanstandet (geprüft, aber unauffällig)
+- **Secrets:** `AUTH_TOKEN` wird ausschließlich aus der Umgebungsvariable gelesen; keine hartkodierten Produktions-Secrets. Der Test-Token `test-token` ist als Test-Fixture klar erkennbar und unkritisch.
+- **Injection:** JSON-Parsing-Fehler werden generisch behandelt; Body-Limit und Content-Type-Prüfung sind vorhanden. Keine SQL-, Command- oder Pfad-Injection erkennbar.
+- **AuthN/AuthZ:** Der Bearer-Token-Vergleich erfolgt mit `subtle.ConstantTimeCompare`; ein leerer `AUTH_TOKEN` führt zu fail-closed `401`.
+- **Dependencies:** Es sind nur Standardbibliotheks-Pakete im Einsatz; keine bekannten verwundbaren Drittanbieter-Abhängigkeiten sichtbar.
+- **Transport/Timeouts:** Der Server ist auf `127.0.0.1:8080` gebunden und mit `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` und `IdleTimeout` konfiguriert. TLS ist optional, was in der lokalen Standardkonfiguration vertretbar ist.
