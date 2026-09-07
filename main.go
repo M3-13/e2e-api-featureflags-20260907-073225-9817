@@ -9,12 +9,12 @@ import (
 // newMux registers all seven routes onto a fresh mux and returns it.
 func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /flags", handleCreateFlag)
-	mux.HandleFunc("GET /flags", handleListFlags)
-	mux.HandleFunc("GET /flags/{key}", handleGetFlag)
-	mux.HandleFunc("PUT /flags/{key}", handleUpdateFlag)
-	mux.HandleFunc("DELETE /flags/{key}", handleDeleteFlag)
-	mux.HandleFunc("GET /flags/{key}/evaluate", handleEvaluate)
+	mux.Handle("POST /flags", authMiddleware(http.HandlerFunc(handleCreateFlag)))
+	mux.Handle("GET /flags", authMiddleware(http.HandlerFunc(handleListFlags)))
+	mux.Handle("GET /flags/{key}", authMiddleware(http.HandlerFunc(handleGetFlag)))
+	mux.Handle("PUT /flags/{key}", authMiddleware(http.HandlerFunc(handleUpdateFlag)))
+	mux.Handle("DELETE /flags/{key}", authMiddleware(http.HandlerFunc(handleDeleteFlag)))
+	mux.Handle("GET /flags/{key}/evaluate", authMiddleware(http.HandlerFunc(handleEvaluate)))
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	return mux
 }
