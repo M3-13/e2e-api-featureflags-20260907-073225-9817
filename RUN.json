@@ -1,0 +1,15 @@
+{
+  "runcontract": 1,
+  "services": [
+    {
+      "name": "api",
+      "dir": ".",
+      "stack": "go",
+      "kind": "server",
+      "build": [["go", "build", "./..."]],
+      "start": ["go", "run", "."],
+      "port": 8080,
+      "health": { "path": "/healthz", "expect_status": [200] }
+    }
+  ]
+}
